@@ -39,7 +39,7 @@ let files = [];
 let activeIndex = -1;
 let filterText = "";
 const collapsedFolders = new Set();
-let sourceMode = "netlify";
+let sourceMode = "local";
 
 function setStatus(text) {
   statusEl.textContent = text;
@@ -136,6 +136,9 @@ function toGithubRawUrl(path) {
 }
 
 function toRawUrl(path) {
+  if (sourceMode === "local") {
+    return encodePath(path);
+  }
   if (sourceMode === "github") {
     return toGithubRawUrl(path);
   }
@@ -308,12 +311,18 @@ function renderList() {
 async function loadFileList() {
   setStatus("正在抓取檔案列表...");
   let tree = null;
-  let netlifyError = null;
-  let githubError = null;
-  const preferGithub =
-    forceSourceFromQuery === "github" ||
-    (forceSourceFromQuery !== "netlify" && window.location.hostname.endsWith(".github.io"));
 
+  // 1) Try loading from local manifest.json (for local / static hosting)
+  const loadFromLocal = async () => {
+    const resp = await fetch("manifest.json");
+    if (!resp.ok) throw new Error(`manifest.json HTTP ${resp.status}`);
+    const data = await resp.json();
+    if (!Array.isArray(data)) throw new Error("manifest.json 格式不正確");
+    sourceMode = "local";
+    return data.map((path) => ({ path, type: "blob" }));
+  };
+
+  // 2) Netlify
   const loadFromNetlify = async () => {
     const resp = await fetch(getTreeApiUrl());
     if (!resp.ok) {
@@ -326,6 +335,7 @@ async function loadFileList() {
     return data.tree;
   };
 
+  // 3) GitHub API
   const loadFromGithub = async () => {
     const resp = await fetch(getGithubTreeApiUrl());
     if (!resp.ok) {
@@ -338,34 +348,29 @@ async function loadFileList() {
     return data.tree;
   };
 
+  // Try local first, then remote
+  const strategies = [loadFromLocal];
+  const preferGithub =
+    forceSourceFromQuery === "github" ||
+    (forceSourceFromQuery !== "netlify" && window.location.hostname.endsWith(".github.io"));
   if (preferGithub) {
-    try {
-      tree = await loadFromGithub();
-    } catch (err) {
-      githubError = err;
-      try {
-        tree = await loadFromNetlify();
-      } catch (fallbackErr) {
-        netlifyError = fallbackErr;
-      }
-    }
+    strategies.push(loadFromGithub, loadFromNetlify);
   } else {
+    strategies.push(loadFromNetlify, loadFromGithub);
+  }
+
+  let lastError = null;
+  for (const strategy of strategies) {
     try {
-      tree = await loadFromNetlify();
+      tree = await strategy();
+      break;
     } catch (err) {
-      netlifyError = err;
-      try {
-        tree = await loadFromGithub();
-      } catch (fallbackErr) {
-        githubError = fallbackErr;
-      }
+      lastError = err;
     }
   }
 
   if (!tree) {
-    throw new Error(
-      `Netlify 與 GitHub 皆讀取失敗。Netlify: ${String(netlifyError)} | GitHub: ${String(githubError)}`,
-    );
+    throw new Error(`所有來源皆讀取失敗：${String(lastError)}`);
   }
 
   files = tree
@@ -373,7 +378,7 @@ async function loadFileList() {
     .filter((item) => item.path !== "README.md")
     .sort((a, b) => compareFilePaths(a.path, b.path));
 
-  if (files.length === 0) throw new Error("目前分支找不到可讀取的 Markdown 檔");
+  if (files.length === 0) throw new Error("找不到可讀取的 Markdown 檔案");
 }
 
 async function loadChapterTitles() {
